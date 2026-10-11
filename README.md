@@ -17,7 +17,8 @@ Web app PHP + JavaScript per l'estrazione del testo da PDF tramite
 
 ## Requisiti
 
-- PHP 8.x con estensione `fileinfo`
+- PHP **5.5+** oppure PHP **8.1+** (vedi sotto il meccanismo di selezione)
+  con estensione `fileinfo` (e `openssl` consigliata sui PHP 5.x)
 - `pdfinfo` e `pdftotext` (pacchetto `poppler-utils`)
 - Nessuna dipendenza Composer, nessun database
 
@@ -41,12 +42,29 @@ Poi apri <http://localhost:8000/public/>.
 ## Struttura
 
 ```
-api/pdf.php        API (upload, extract, extract_bulk)
+api/pdf.php        Dispatcher: sceglie l'API in base alla versione di PHP
+api/pdf_php8.php   Implementazione moderna (PHP >= 8.1)
+api/pdf_php55.php  Port compatibile PHP 5.5+ (usato anche su 7.x)
 public/index.php   Interfaccia
 public/app.js      Logica lato client (PDF.js)
 public/style.css   Stili
 tmp/sessions/      PDF caricati, per sessione (auto-puliti, non nel repo)
 ```
+
+### Selezione automatica dell'API per versione di PHP
+
+`api/pdf.php` è un dispatcher scritto in codice parsabile da PHP 5.5:
+al caricamento controlla `PHP_VERSION_ID` e include l'implementazione
+adatta, senza che il frontend debba sapere nulla della versione in uso.
+
+| Versione di PHP | Implementazione |
+|---|---|
+| >= 8.1 | `pdf_php8.php` (`declare(strict_types)`, tipi, `never`) |
+| < 8.1 (incluse 5.5–8.0) | `pdf_php55.php` (stesse funzionalità, stile 5.5) |
+
+> Nota: PHP 5.5 è EOL dal 2016; il port è pensato per hosting legacy.
+> Testato con lint ed e2e su container `php:5.6-cli` (l'immagine ufficiale
+> 5.5 non è più scaricabile da Docker Hub).
 
 ## API
 
