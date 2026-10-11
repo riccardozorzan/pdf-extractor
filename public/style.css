@@ -41,6 +41,20 @@ main {
     align-items: center;
     gap: 12px;
     flex-wrap: wrap;
+    border: 2px dashed transparent;
+    border-radius: 8px;
+    padding: 6px;
+    transition: border-color 0.15s, background 0.15s;
+}
+
+#uploadForm.dragover {
+    border-color: #245cc5;
+    background: #eef3fc;
+}
+
+.dropHint {
+    color: #666;
+    font-size: 14px;
 }
 
 button {
@@ -93,6 +107,7 @@ button:disabled {
     display: block;
     max-width: 100%;
     height: auto;
+    cursor: crosshair;
 }
 
 #selectionOverlay {
@@ -127,6 +142,13 @@ button:disabled {
 .actions {
     display: flex;
     gap: 10px;
+    flex-wrap: wrap;
+}
+
+.text-actions {
+    display: flex;
+    gap: 10px;
+    margin: 10px 0;
 }
 
 #extractedText {

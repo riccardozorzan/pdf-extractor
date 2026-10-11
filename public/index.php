@@ -23,7 +23,7 @@
 
         <section class="toolbar">
 
-            <form id="uploadForm">
+            <form id="uploadForm" class="dropzone">
                 <label for="pdfFile">
                     Seleziona un PDF
                 </label>
@@ -39,6 +39,10 @@
                 <button type="submit">
                     Carica PDF
                 </button>
+
+                <span class="dropHint">
+                    oppure trascina qui il file
+                </span>
             </form>
 
         </section>
@@ -153,6 +157,10 @@
                     Estrai testo
                 </button>
 
+                <button id="bulkExtractButton" disabled>
+                    Estrai da tutte le pagine
+                </button>
+
                 <button id="clearAreaButton" disabled>
                     Cancella area
                 </button>
@@ -160,6 +168,18 @@
             </div>
 
             <h3>Testo estratto</h3>
+
+            <div class="text-actions">
+
+                <button id="copyTextButton" disabled>
+                    Copia negli appunti
+                </button>
+
+                <button id="downloadTextButton" disabled>
+                    Scarica .txt
+                </button>
+
+            </div>
 
             <pre id="extractedText">Nessuna estrazione effettuata.</pre>
 

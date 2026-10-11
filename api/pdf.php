@@ -5,10 +5,9 @@ declare(strict_types=1);
 
 session_start();
 
-const MAX_CACHE_PAGES = 5;
 const MAX_UPLOAD_SIZE = 50 * 1024 * 1024;
+const SESSION_TTL = 3600;
 
-const PDFTK_BIN = '/usr/bin/pdftk';
 const PDFINFO_BIN = '/usr/bin/pdfinfo';
 const PDFTOTEXT_BIN = '/usr/bin/pdftotext';
 
@@ -25,10 +24,9 @@ if (empty($_SESSION['pdf_id'])) {
 }
 
 $sessionDir = BASE_TMP . '/' . $_SESSION['pdf_id'];
-$cacheDir = $sessionDir . '/cache';
 
-if (!is_dir($cacheDir)) {
-    mkdir($cacheDir, 0700, true);
+if (!is_dir($sessionDir)) {
+    mkdir($sessionDir, 0700, true);
 }
 
 $pdfPath = $sessionDir . '/document.pdf';
@@ -64,6 +62,98 @@ function runCommand(array $args): array
         'code' => $exitCode,
         'output' => implode("\n", $output),
     ];
+}
+
+// Legge e valida l'area di estrazione (in punti PDF) dai
+// parametri POST. Restituisce null se non è valida.
+function readAreaFromPost(): ?array
+{
+    $area = [];
+
+    foreach (['x', 'y', 'w', 'h'] as $key) {
+        $value = filter_var(
+            $_POST[$key] ?? null,
+            FILTER_VALIDATE_INT
+        );
+
+        if ($value === false || $value === null) {
+            return null;
+        }
+
+        $area[$key] = $value;
+    }
+
+    // Limiti prudenziali, da adeguare alle esigenze applicative.
+    if (
+        $area['x'] < 0 || $area['y'] < 0
+        || $area['w'] <= 0 || $area['h'] <= 0
+        || $area['x'] > 20000 || $area['y'] > 20000
+        || $area['w'] > 20000 || $area['h'] > 20000
+    ) {
+        return null;
+    }
+
+    return $area;
+}
+
+// Estrae il testo di una pagina nell'area indicata.
+function extractAreaText(string $pdfPath, int $page, array $area): array
+{
+    return runCommand([
+        PDFTOTEXT_BIN,
+        '-f', (string) $page,
+        '-l', (string) $page,
+        '-x', (string) $area['x'],
+        '-y', (string) $area['y'],
+        '-W', (string) $area['w'],
+        '-H', (string) $area['h'],
+        $pdfPath,
+        '-',
+    ]);
+}
+
+// Elimina ricorsivamente una cartella e il suo contenuto.
+function deleteDirectory(string $dir): void
+{
+    $items = new RecursiveIteratorIterator(
+        new RecursiveDirectoryIterator(
+            $dir,
+            FilesystemIterator::SKIP_DOTS
+        ),
+        RecursiveIteratorIterator::CHILD_FIRST
+    );
+
+    foreach ($items as $item) {
+        if ($item->isDir()) {
+            rmdir($item->getPathname());
+        } else {
+            unlink($item->getPathname());
+        }
+    }
+
+    rmdir($dir);
+}
+
+// Elimina le sessioni scadute per evitare che i PDF
+// restino su disco senza limite.
+foreach (glob(BASE_TMP . '/*', GLOB_ONLYDIR) ?: [] as $oldSessionDir) {
+    if (!preg_match(
+        '/^[a-f0-9]{32}$/',
+        basename($oldSessionDir)
+    )) {
+        continue;
+    }
+
+    if (time() - filemtime($oldSessionDir) < SESSION_TTL) {
+        continue;
+    }
+
+    deleteDirectory($oldSessionDir);
+}
+
+// Tiene viva la sessione corrente finché è in uso.
+if (is_dir($sessionDir)) {
+    touch($sessionDir);
 }
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST'
@@ -136,13 +226,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST'
         ], 500);
     }
 
-    // Elimina le vecchie pagine in cache.
-    foreach (glob($cacheDir . '/*.pdf') ?: [] as $cachedFile) {
-        if (is_file($cachedFile)) {
-            unlink($cachedFile);
-        }
-    }
-
     $metadata = [
         'pages' => $pages,
         'filename' => basename($file['name']),
@@ -160,83 +243,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST'
         'pages' => $pages,
         'filename' => $metadata['filename'],
     ]);
-}
-
-if (
-    $_SERVER['REQUEST_METHOD'] === 'GET'
-    && ($_GET['action'] ?? '') === 'page'
-) {
-    if (!is_file($pdfPath) || !is_file($metadataPath)) {
-        jsonResponse([
-            'error' => 'Nessun PDF caricato.'
-        ], 400);
-    }
-
-    $metadata = json_decode(
-        file_get_contents($metadataPath),
-        true
-    );
-
-    $totalPages = (int) ($metadata['pages'] ?? 0);
-    $page = filter_input(INPUT_GET, 'page', FILTER_VALIDATE_INT);
-
-    if (
-        $page === false
-        || $page === null
-        || $page < 1
-        || $page > $totalPages
-    ) {
-        jsonResponse([
-            'error' => 'Numero di pagina non valido.'
-        ], 400);
-    }
-
-    $pageFile = $cacheDir . '/page_' . $page . '.pdf';
-
-    if (!is_file($pageFile)) {
-
-        $result = runCommand([
-            PDFTK_BIN,
-            $pdfPath,
-            'cat',
-            (string) $page,
-            'output',
-            $pageFile,
-        ]);
-
-        if ($result['code'] !== 0 || !is_file($pageFile)) {
-            jsonResponse([
-                'error' => 'Impossibile estrarre la pagina.'
-            ], 500);
-        }
-
-        // Mantiene in cache al massimo MAX_CACHE_PAGES file.
-        $cachedFiles = glob($cacheDir . '/page_*.pdf') ?: [];
-
-        usort($cachedFiles, static function ($a, $b) {
-            return filemtime($a) <=> filemtime($b);
-        });
-
-        while (count($cachedFiles) > MAX_CACHE_PAGES) {
-            $oldest = array_shift($cachedFiles);
-
-            if ($oldest !== $pageFile && is_file($oldest)) {
-                unlink($oldest);
-            }
-        }
-    }
-
-    touch($pageFile);
-
-    header('Content-Type: application/pdf');
-    header('Content-Disposition: inline; filename="page.pdf"');
-    header('Cache-Control: private, no-store');
-
-    header('Content-Length: ' . filesize($pageFile));
-
-    readfile($pageFile);
-
-    exit;
 }
 
 if (
@@ -261,62 +267,19 @@ if (
         FILTER_VALIDATE_INT
     );
 
-    $x = filter_var(
-        $_POST['x'] ?? null,
-        FILTER_VALIDATE_INT
-    );
-
-    $y = filter_var(
-        $_POST['y'] ?? null,
-        FILTER_VALIDATE_INT
-    );
-
-    $w = filter_var(
-        $_POST['w'] ?? null,
-        FILTER_VALIDATE_INT
-    );
-
-    $h = filter_var(
-        $_POST['h'] ?? null,
-        FILTER_VALIDATE_INT
-    );
+    $area = readAreaFromPost();
 
     if (
         $page === false || $page === null
         || $page < 1 || $page > $totalPages
-        || $x === false || $x === null
-        || $y === false || $y === null
-        || $w === false || $w === null
-        || $h === false || $h === null
-        || $x < 0 || $y < 0
-        || $w <= 0 || $h <= 0
+        || $area === null
     ) {
         jsonResponse([
             'error' => 'Coordinate o numero di pagina non validi.'
         ], 400);
     }
 
-    // Limiti prudenziali, da adeguare alle esigenze applicative.
-    if (
-        $x > 20000 || $y > 20000
-        || $w > 20000 || $h > 20000
-    ) {
-        jsonResponse([
-            'error' => 'Area di estrazione troppo grande.'
-        ], 400);
-    }
-
-    $result = runCommand([
-        PDFTOTEXT_BIN,
-        '-f', (string) $page,
-        '-l', (string) $page,
-        '-x', (string) $x,
-        '-y', (string) $y,
-        '-W', (string) $w,
-        '-H', (string) $h,
-        $pdfPath,
-        '-',
-    ]);
+    $result = extractAreaText($pdfPath, $page, $area);
 
     if ($result['code'] !== 0) {
         jsonResponse([
@@ -327,12 +290,83 @@ if (
     jsonResponse([
         'success' => true,
         'page' => $page,
-        'area' => [
-            'x' => $x,
-            'y' => $y,
-            'w' => $w,
-            'h' => $h,
-        ],
+        'area' => $area,
         'text' => $result['output'],
+    ]);
+}
+
+if (
+    $_SERVER['REQUEST_METHOD'] === 'POST'
+    && ($_POST['action'] ?? '') === 'extract_bulk'
+) {
+    if (!is_file($pdfPath) || !is_file($metadataPath)) {
+        jsonResponse([
+            'error' => 'Nessun PDF caricato.'
+        ], 400);
+    }
+
+    $metadata = json_decode(
+        file_get_contents($metadataPath),
+        true
+    );
+
+    $totalPages = (int) ($metadata['pages'] ?? 0);
+
+    $area = readAreaFromPost();
+
+    if ($totalPages < 1 || $area === null) {
+        jsonResponse([
+            'error' => 'Coordinate non valide.'
+        ], 400);
+    }
+
+    // Intervallo pagine opzionale, per l'estrazione a chunk.
+    $from = filter_var(
+        $_POST['from'] ?? 1,
+        FILTER_VALIDATE_INT
+    );
+
+    $to = filter_var(
+        $_POST['to'] ?? $totalPages,
+        FILTER_VALIDATE_INT
+    );
+
+    if ($from === false || $from === null || $from < 1) {
+        $from = 1;
+    }
+
+    if ($to === false || $to === null || $to > $totalPages) {
+        $to = $totalPages;
+    }
+
+    if ($from > $to) {
+        jsonResponse([
+            'error' => 'Intervallo di pagine non valido.'
+        ], 400);
+    }
+
+    $pages = [];
+
+    for ($page = $from; $page <= $to; $page++) {
+        $result = extractAreaText($pdfPath, $page, $area);
+
+        if ($result['code'] !== 0) {
+            jsonResponse([
+                'error' => "Errore durante l’estrazione della pagina {$page}."
+            ], 500);
+        }
+
+        $pages[] = [
+            'page' => $page,
+            'text' => $result['output'],
+        ];
+    }
+
+    jsonResponse([
+        'success' => true,
+        'from' => $from,
+        'to' => $to,
+        'area' => $area,
+        'pages' => $pages,
     ]);
 }
