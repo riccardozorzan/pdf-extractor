@@ -1,0 +1,6 @@
+tmp/
+storage/
+.DS_Store
+*.swp
+.idea/
+.vscode/
