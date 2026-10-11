@@ -112,6 +112,35 @@ function extractAreaText(string $pdfPath, int $page, array $area): array
     ]);
 }
 
+// Traduce il codice di errore di upload di PHP in un
+// messaggio leggibile per l'utente.
+function uploadErrorMessage(int $error): string
+{
+    $limit = ini_get('upload_max_filesize');
+
+    switch ($error) {
+        case UPLOAD_ERR_INI_SIZE:
+        case UPLOAD_ERR_FORM_SIZE:
+            return "Il file supera i limiti di PHP "
+                . "(upload_max_filesize attuale: {$limit}).";
+
+        case UPLOAD_ERR_PARTIAL:
+            return 'Il caricamento del file è stato interrotto.';
+
+        case UPLOAD_ERR_NO_TMP_DIR:
+            return 'Cartella temporanea mancante sul server.';
+
+        case UPLOAD_ERR_CANT_WRITE:
+            return 'Impossibile scrivere il file sul disco di destinazione.';
+
+        case UPLOAD_ERR_EXTENSION:
+            return 'Un’estensione di PHP ha bloccato il caricamento.';
+
+        default:
+            return 'Errore durante il caricamento del PDF.';
+    }
+}
+
 // Elimina ricorsivamente una cartella e il suo contenuto.
 function deleteDirectory(string $dir): void
 {
@@ -156,6 +185,28 @@ if (is_dir($sessionDir)) {
     touch($sessionDir);
 }
 
+// Se post_max_size viene superato, $_POST e $_FILES restano
+// vuoti: intercettiamo il caso per restituire un errore chiaro
+// invece di una risposta vuota.
+if (
+    $_SERVER['REQUEST_METHOD'] === 'POST'
+    && empty($_POST['action'])
+    && empty($_FILES)
+) {
+    error_log(sprintf(
+        'POST senza action né file: CONTENT_LENGTH=%s, post_max_size=%s',
+        $_SERVER['CONTENT_LENGTH'] ?? 'n/a',
+        ini_get('post_max_size')
+    ));
+
+    jsonResponse([
+        'error' => 'La richiesta supera i limiti di PHP '
+            . '(post_max_size attuale: ' . ini_get('post_max_size') . ').'
+            . ' Se stai usando il server di sviluppo, avvialo con '
+            . '-d post_max_size=52M.',
+    ], 400);
+}
+
 if ($_SERVER['REQUEST_METHOD'] === 'POST'
     && ($_POST['action'] ?? '') === 'upload') {
 
@@ -163,8 +214,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST'
         !isset($_FILES['pdf'])
         || $_FILES['pdf']['error'] !== UPLOAD_ERR_OK
     ) {
+        $uploadError = (int) ($_FILES['pdf']['error'] ?? -1);
+
+        error_log(sprintf(
+            'Upload PDF fallito: error=%d, size=%s',
+            $uploadError,
+            $_FILES['pdf']['size'] ?? 'n/a'
+        ));
+
         jsonResponse([
-            'error' => 'Errore durante il caricamento del PDF.'
+            'error' => uploadErrorMessage($uploadError)
         ], 400);
     }
 
@@ -181,7 +240,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST'
 
     if ($mime !== 'application/pdf') {
         jsonResponse([
-            'error' => 'Il file caricato non è un PDF valido.'
+            'error' => "Il file caricato non è un PDF valido (rilevato: {$mime})."
         ], 400);
     }
 

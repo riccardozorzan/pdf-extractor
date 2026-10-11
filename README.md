@@ -26,8 +26,11 @@ Web app PHP + JavaScript per l'estrazione del testo da PDF tramite
 Dalla root del progetto:
 
 ```bash
-php -S localhost:8000
+php -d upload_max_filesize=50M -d post_max_size=52M -S localhost:8000
 ```
+
+> I flag `-d` sono necessari perché i default di PHP (`upload_max_filesize=2M`,
+> `post_max_size=8M`) rifiutano PDF più grandi di 2 MB con un errore 400.
 
 Poi apri <http://localhost:8000/public/>.
 
