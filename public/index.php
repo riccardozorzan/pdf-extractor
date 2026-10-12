@@ -198,7 +198,7 @@
     </main>
 
     <script
-        src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"
+        src="vendor/pdfjs/pdf.min.js"
     ></script>
 
     <script src="app.js"></script>
