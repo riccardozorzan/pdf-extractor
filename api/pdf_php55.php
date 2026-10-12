@@ -334,6 +334,18 @@ if (
     ), 400);
 }
 
+// Limiti di upload esposti al frontend (fonte di verita).
+if (
+    isset($_SERVER['REQUEST_METHOD'])
+    && $_SERVER['REQUEST_METHOD'] === 'GET'
+    && (isset($_GET['action']) ? $_GET['action'] : '') === 'limits'
+) {
+    jsonResponse(array(
+        'max_files' => MAX_UPLOAD_FILES,
+        'max_size_mb' => (int) ceil(MAX_UPLOAD_SIZE / 1048576),
+    ));
+}
+
 if (
     isset($_SERVER['REQUEST_METHOD'])
     && $_SERVER['REQUEST_METHOD'] === 'POST'

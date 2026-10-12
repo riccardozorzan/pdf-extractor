@@ -46,6 +46,13 @@
                 </span>
             </form>
 
+            <p class="limits">
+                Limiti di caricamento:
+                <strong id="limitsText">100 file, 50 MB per file</strong>
+            </p>
+
+            <p id="uploadSelection" class="limits selection" hidden></p>
+
         </section>
 
         <section class="viewer">

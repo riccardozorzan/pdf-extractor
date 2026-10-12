@@ -9,6 +9,9 @@ Web app PHP + JavaScript per l'estrazione del testo da PDF tramite
   pulsante o **trascinamento**: vengono trattati come un unico documento con
   paginazione continua (pagine 1..N) e ogni estrazione riporta il nome del
   PDF sorgente
+- Visualizzazione dei **limiti di upload** (numero file e MB per file,
+  letti dal server con `action=limits`) con riepilogo live della selezione
+  e avviso rosso in caso di superamento
 - Visualizzazione delle pagine con PDF.js
 - Selezione dell'area di estrazione **trascinando il mouse** sulla pagina
   (oppure digitando a mano le coordinate in punti PDF)
@@ -77,6 +80,7 @@ o `multipart/form-data`; lo stato è mantenuto via cookie di sessione.
 | action | Parametri | Descrizione |
 |---|---|---|
 | `upload` | `pdf` (uno o più file) | Carica e valida i PDF, restituisce `pages`, `filename` e l’elenco `files` |
+| `limits` (GET) | — | Limiti di upload: `max_files` e `max_size_mb` |
 | `extract` | `page` (globale), `x`, `y`, `w`, `h` | Testo dell'area su una pagina, mappata al PDF sorgente |
 | `extract_bulk` | `x`, `y`, `w`, `h`, `from`, `to` | Testo dell'area su pagine globali, con `source` per pagina |
 

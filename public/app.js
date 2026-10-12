@@ -3,7 +3,6 @@ pdfjsLib.GlobalWorkerOptions.workerSrc =
 
 const API = '../api/pdf.php';
 
-const MAX_UPLOAD_SIZE_MB = 50;
 const BULK_CHUNK_SIZE = 25;
 
 const uploadForm = document.getElementById('uploadForm');
@@ -54,6 +53,12 @@ let displayedScale = 1;
 let currentFilename = '';
 let selectionStart = null;
 
+// Limiti di upload: valori di default, poi aggiornati dal server.
+let uploadLimit = { maxFiles: 100, maxSizeMb: 50 };
+
+const limitsText = document.getElementById('limitsText');
+const uploadSelection = document.getElementById('uploadSelection');
+
 function setStatus(message) {
     status.textContent = message;
 }
@@ -76,23 +81,93 @@ async function apiJson(url, options = {}) {
     return data;
 }
 
-async function uploadFiles(fileList) {
+// Verifica la selezione rispetto ai limiti (fonte di verita: server).
+function validateFiles(fileList) {
     const files = Array.from(fileList || []);
 
     if (files.length === 0) {
-        setStatus('Seleziona almeno un PDF.');
-        return;
+        return {
+            ok: false,
+            files: files,
+            message: 'Seleziona almeno un PDF.'
+        };
+    }
+
+    if (files.length > uploadLimit.maxFiles) {
+        return {
+            ok: false,
+            files: files,
+            message: `Troppi file: massimo ${uploadLimit.maxFiles} PDF alla volta (selezionati ${files.length}).`
+        };
     }
 
     for (const file of files) {
-        if (file.size > MAX_UPLOAD_SIZE_MB * 1024 * 1024) {
-            setStatus(
-                `«${file.name}» supera la dimensione massima di ${MAX_UPLOAD_SIZE_MB} MB.`
-            );
-
-            return;
+        if (file.size > uploadLimit.maxSizeMb * 1024 * 1024) {
+            return {
+                ok: false,
+                files: files,
+                message: `«${file.name}» supera la dimensione massima di ${uploadLimit.maxSizeMb} MB.`
+            };
         }
     }
+
+    return { ok: true, files: files, message: '' };
+}
+
+// Aggiorna il riepilogo della selezione corrente sotto il form.
+function updateSelectionInfo() {
+    const check = validateFiles(pdfFile.files);
+
+    if (check.files.length === 0) {
+        uploadSelection.hidden = true;
+        uploadSelection.classList.remove('warning');
+        return;
+    }
+
+    const totalBytes = check.files.reduce(
+        (sum, file) => sum + file.size,
+        0
+    );
+
+    const totalMb = totalBytes / (1024 * 1024);
+
+    const totalLabel = totalMb >= 0.1
+        ? `${totalMb.toFixed(1)} MB`
+        : `${Math.max(1, Math.round(totalBytes / 1024))} KB`;
+
+    uploadSelection.hidden = false;
+    uploadSelection.textContent = check.ok
+        ? `Selezionati ${check.files.length} PDF (${totalLabel}, massimo ${uploadLimit.maxFiles} file da ${uploadLimit.maxSizeMb} MB).`
+        : check.message;
+
+    uploadSelection.classList.toggle('warning', !check.ok);
+}
+
+async function loadLimits() {
+    try {
+        const params = 'action=limits';
+        const result = await apiJson(API + '?' + params);
+
+        uploadLimit.maxFiles = result.max_files;
+        uploadLimit.maxSizeMb = result.max_size_mb;
+
+        limitsText.textContent =
+            `${uploadLimit.maxFiles} file, ${uploadLimit.maxSizeMb} MB per file`;
+    } catch (error) {
+        limitsText.textContent =
+            `${uploadLimit.maxFiles} file, ${uploadLimit.maxSizeMb} MB per file`;
+    }
+}
+
+async function uploadFiles(fileList) {
+    const check = validateFiles(fileList);
+
+    if (!check.ok) {
+        setStatus(check.message);
+        return;
+    }
+
+    const files = check.files;
 
     const formData = new FormData();
 
@@ -190,6 +265,8 @@ uploadForm.addEventListener('submit', (event) => {
     uploadFiles(pdfFile.files);
 });
 
+pdfFile.addEventListener('change', updateSelectionInfo);
+
 // Caricamento trascinando i file nella zona di upload.
 uploadForm.addEventListener('dragover', (event) => {
     event.preventDefault();
@@ -207,6 +284,8 @@ uploadForm.addEventListener('drop', (event) => {
     if (event.dataTransfer.files.length > 0) {
         pdfFile.files = event.dataTransfer.files;
     }
+
+    updateSelectionInfo();
 
     uploadFiles(event.dataTransfer.files);
 });
@@ -723,3 +802,5 @@ window.addEventListener('resize', () => {
         renderPage(currentPage);
     }
 });
+
+loadLimits();
