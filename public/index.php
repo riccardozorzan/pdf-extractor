@@ -25,7 +25,7 @@
 
             <form id="uploadForm" class="dropzone">
                 <label for="pdfFile">
-                    Seleziona un PDF
+                    Seleziona uno o più PDF
                 </label>
 
                 <input
@@ -33,6 +33,7 @@
                     id="pdfFile"
                     name="pdf"
                     accept=".pdf,application/pdf"
+                    multiple
                     required
                 >
 
@@ -41,7 +42,7 @@
                 </button>
 
                 <span class="dropHint">
-                    oppure trascina qui il file
+                    oppure trascina qui i file
                 </span>
             </form>
 

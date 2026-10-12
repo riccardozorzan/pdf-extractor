@@ -6,6 +6,7 @@ declare(strict_types=1);
 session_start();
 
 const MAX_UPLOAD_SIZE = 50 * 1024 * 1024;
+const MAX_UPLOAD_FILES = 100;
 const SESSION_TTL = 3600;
 
 const PDFINFO_BIN = '/usr/bin/pdfinfo';
@@ -29,7 +30,6 @@ if (!is_dir($sessionDir)) {
     mkdir($sessionDir, 0700, true);
 }
 
-$pdfPath = $sessionDir . '/document.pdf';
 $metadataPath = $sessionDir . '/metadata.json';
 
 function jsonResponse(array $data, int $status = 200): never
@@ -62,6 +62,81 @@ function runCommand(array $args): array
         'code' => $exitCode,
         'output' => implode("\n", $output),
     ];
+}
+
+// Normalizza $_FILES in un elenco di file singoli, gestendo
+// sia l'upload di un solo file sia l'array di piu file.
+function normalizeUploadedFiles(array $file): array
+{
+    if (!is_array($file['name'])) {
+        return [$file];
+    }
+
+    $files = [];
+
+    foreach ($file['name'] as $index => $name) {
+        $files[] = [
+            'name' => $name,
+            'tmp_name' => $file['tmp_name'][$index],
+            'error' => $file['error'][$index],
+            'size' => $file['size'][$index],
+        ];
+    }
+
+    return $files;
+}
+
+// Carica i metadata e normalizza il formato: le sessioni create
+// prima del supporto multi-PDF hanno solo pages/filename.
+function loadMetadata(string $metadataPath, string $sessionDir): ?array
+{
+    if (!is_file($metadataPath)) {
+        return null;
+    }
+
+    $metadata = json_decode(
+        file_get_contents($metadataPath),
+        true
+    );
+
+    if (!is_array($metadata)) {
+        return null;
+    }
+
+    if (!isset($metadata['documents'])) {
+        if (!is_file($sessionDir . '/document.pdf')) {
+            return null;
+        }
+
+        $metadata['documents'] = [[
+            'file' => 'document.pdf',
+            'filename' => (string) ($metadata['filename'] ?? 'documento.pdf'),
+            'pages' => (int) ($metadata['pages'] ?? 0),
+            'offset' => 0,
+        ]];
+    }
+
+    return $metadata;
+}
+
+// Traduce una pagina "globale" (nel documento composto da tutti
+// i PDF caricati) nel file e nella pagina locali.
+function locatePage(array $metadata, string $sessionDir, int $globalPage): ?array
+{
+    foreach ($metadata['documents'] as $document) {
+        $offset = (int) $document['offset'];
+        $pages = (int) $document['pages'];
+
+        if ($globalPage > $offset && $globalPage <= $offset + $pages) {
+            return [
+                'path' => $sessionDir . '/' . $document['file'],
+                'page' => $globalPage - $offset,
+                'filename' => $document['filename'],
+            ];
+        }
+    }
+
+    return null;
 }
 
 // Legge e valida l'area di estrazione (in punti PDF) dai
@@ -210,84 +285,131 @@ if (
 if ($_SERVER['REQUEST_METHOD'] === 'POST'
     && ($_POST['action'] ?? '') === 'upload') {
 
-    if (
-        !isset($_FILES['pdf'])
-        || $_FILES['pdf']['error'] !== UPLOAD_ERR_OK
-    ) {
-        $uploadError = (int) ($_FILES['pdf']['error'] ?? -1);
-
-        error_log(sprintf(
-            'Upload PDF fallito: error=%d, size=%s',
-            $uploadError,
-            $_FILES['pdf']['size'] ?? 'n/a'
-        ));
+    if (!isset($_FILES['pdf'])) {
+        error_log('Upload PDF fallito: nessun file ricevuto');
 
         jsonResponse([
-            'error' => uploadErrorMessage($uploadError)
+            'error' => 'Errore durante il caricamento del PDF.'
         ], 400);
     }
 
-    $file = $_FILES['pdf'];
+    $files = normalizeUploadedFiles($_FILES['pdf']);
 
-    if ($file['size'] > MAX_UPLOAD_SIZE) {
+    if ($files === []) {
         jsonResponse([
-            'error' => 'Il PDF supera la dimensione massima consentita.'
+            'error' => 'Nessun file ricevuto.'
+        ], 400);
+    }
+
+    if (count($files) > MAX_UPLOAD_FILES) {
+        jsonResponse([
+            'error' => 'Troppi file: massimo ' . MAX_UPLOAD_FILES . ' PDF per volta.'
         ], 413);
     }
 
-    $finfo = new finfo(FILEINFO_MIME_TYPE);
-    $mime = $finfo->file($file['tmp_name']);
+    // Valida tutti i file prima di toccare i documenti della
+    // sessione: se uno fallisce, i PDF precedenti restano.
+    $validated = [];
 
-    if ($mime !== 'application/pdf') {
-        jsonResponse([
-            'error' => "Il file caricato non è un PDF valido (rilevato: {$mime})."
-        ], 400);
+    foreach ($files as $file) {
+        if ($file['error'] !== UPLOAD_ERR_OK) {
+            error_log(sprintf(
+                'Upload PDF fallito: file=%s, error=%d, size=%s',
+                $file['name'],
+                $file['error'],
+                $file['size']
+            ));
+
+            jsonResponse([
+                'error' => "«{$file['name']}»: " . uploadErrorMessage($file['error'])
+            ], 400);
+        }
+
+        if ($file['size'] > MAX_UPLOAD_SIZE) {
+            jsonResponse([
+                'error' => "«{$file['name']}» supera la dimensione massima consentita."
+            ], 413);
+        }
+
+        $finfo = new finfo(FILEINFO_MIME_TYPE);
+        $mime = $finfo->file($file['tmp_name']);
+
+        if ($mime !== 'application/pdf') {
+            jsonResponse([
+                'error' => "«{$file['name']}» non è un PDF valido (rilevato: {$mime})."
+            ], 400);
+        }
+
+        // Verifica che il file sia leggibile come PDF.
+        $info = runCommand([
+            PDFINFO_BIN,
+            $file['tmp_name']
+        ]);
+
+        if ($info['code'] !== 0) {
+            jsonResponse([
+                'error' => "«{$file['name']}» non è leggibile come PDF."
+            ], 400);
+        }
+
+        if (!preg_match(
+            '/^Pages:\s+(\d+)\s*$/mi',
+            $info['output'],
+            $matches
+        )) {
+            jsonResponse([
+                'error' => "Numero di pagine non disponibile per «{$file['name']}»."
+            ], 400);
+        }
+
+        $file['pages'] = (int) $matches[1];
+
+        if ($file['pages'] < 1) {
+            jsonResponse([
+                'error' => "«{$file['name']}» non contiene pagine."
+            ], 400);
+        }
+
+        $validated[] = $file;
     }
 
-    // Verifica che il file sia leggibile come PDF.
-    $info = runCommand([
-        PDFINFO_BIN,
-        $file['tmp_name']
-    ]);
-
-    if ($info['code'] !== 0) {
-        jsonResponse([
-            'error' => 'Impossibile leggere il documento PDF.'
-        ], 400);
+    // Elimina i documenti della sessione precedente (formato
+    // single-PDF e multi-PDF).
+    foreach (glob($sessionDir . '/document*.pdf') ?: [] as $oldDocument) {
+        unlink($oldDocument);
     }
 
-    // Estrazione del numero di pagine.
-    if (!preg_match(
-        '/^Pages:\s+(\d+)\s*$/mi',
-        $info['output'],
-        $matches
-    )) {
-        jsonResponse([
-            'error' => 'Numero di pagine non disponibile.'
-        ], 400);
-    }
+    // Salva ogni documento e costruisce la mappa delle pagine
+    // globali (offset cumulativo).
+    $documents = [];
+    $offset = 0;
 
-    $pages = (int) $matches[1];
+    foreach ($validated as $index => $file) {
+        $storedName = 'document_' . $index . '.pdf';
 
-    if ($pages < 1) {
-        jsonResponse([
-            'error' => 'Il PDF non contiene pagine.'
-        ], 400);
-    }
+        if (!move_uploaded_file(
+            $file['tmp_name'],
+            $sessionDir . '/' . $storedName
+        )) {
+            jsonResponse([
+                'error' => "Impossibile salvare «{$file['name']}»."
+            ], 500);
+        }
 
-    // Sostituisce il documento della sessione.
-    if (!move_uploaded_file(
-        $file['tmp_name'],
-        $pdfPath
-    )) {
-        jsonResponse([
-            'error' => 'Impossibile salvare il PDF.'
-        ], 500);
+        $documents[] = [
+            'file' => $storedName,
+            'filename' => basename($file['name']),
+            'pages' => $file['pages'],
+            'offset' => $offset,
+        ];
+
+        $offset += $file['pages'];
     }
 
     $metadata = [
-        'pages' => $pages,
-        'filename' => basename($file['name']),
+        'pages' => $offset,
+        'filename' => $documents[0]['filename'],
+        'documents' => $documents,
         'uploaded_at' => date(DATE_ATOM),
     ];
 
@@ -299,8 +421,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST'
 
     jsonResponse([
         'success' => true,
-        'pages' => $pages,
+        'pages' => $offset,
         'filename' => $metadata['filename'],
+        'files' => array_map(static function (array $document): array {
+            return [
+                'filename' => $document['filename'],
+                'pages' => $document['pages'],
+            ];
+        }, $documents),
     ]);
 }
 
@@ -308,16 +436,13 @@ if (
     $_SERVER['REQUEST_METHOD'] === 'POST'
     && ($_POST['action'] ?? '') === 'extract'
 ) {
-    if (!is_file($pdfPath) || !is_file($metadataPath)) {
+    $metadata = loadMetadata($metadataPath, $sessionDir);
+
+    if ($metadata === null) {
         jsonResponse([
             'error' => 'Nessun PDF caricato.'
         ], 400);
     }
-
-    $metadata = json_decode(
-        file_get_contents($metadataPath),
-        true
-    );
 
     $totalPages = (int) ($metadata['pages'] ?? 0);
 
@@ -338,7 +463,15 @@ if (
         ], 400);
     }
 
-    $result = extractAreaText($pdfPath, $page, $area);
+    $target = locatePage($metadata, $sessionDir, $page);
+
+    if ($target === null) {
+        jsonResponse([
+            'error' => 'Numero di pagina non valido.'
+        ], 400);
+    }
+
+    $result = extractAreaText($target['path'], $target['page'], $area);
 
     if ($result['code'] !== 0) {
         jsonResponse([
@@ -358,16 +491,13 @@ if (
     $_SERVER['REQUEST_METHOD'] === 'POST'
     && ($_POST['action'] ?? '') === 'extract_bulk'
 ) {
-    if (!is_file($pdfPath) || !is_file($metadataPath)) {
+    $metadata = loadMetadata($metadataPath, $sessionDir);
+
+    if ($metadata === null) {
         jsonResponse([
             'error' => 'Nessun PDF caricato.'
         ], 400);
     }
-
-    $metadata = json_decode(
-        file_get_contents($metadataPath),
-        true
-    );
 
     $totalPages = (int) ($metadata['pages'] ?? 0);
 
@@ -407,7 +537,15 @@ if (
     $pages = [];
 
     for ($page = $from; $page <= $to; $page++) {
-        $result = extractAreaText($pdfPath, $page, $area);
+        $target = locatePage($metadata, $sessionDir, $page);
+
+        if ($target === null) {
+            jsonResponse([
+                'error' => "Numero di pagina non valido: {$page}."
+            ], 400);
+        }
+
+        $result = extractAreaText($target['path'], $target['page'], $area);
 
         if ($result['code'] !== 0) {
             jsonResponse([
@@ -417,6 +555,7 @@ if (
 
         $pages[] = [
             'page' => $page,
+            'source' => $target['filename'],
             'text' => $result['output'],
         ];
     }

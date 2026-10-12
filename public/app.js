@@ -38,7 +38,8 @@ const fields = {
     h: document.getElementById('coordH')
 };
 
-let pdfDocument = null;
+let pdfDocuments = [];
+let documentMeta = [];
 let currentPage = 1;
 let totalPageCount = 0;
 
@@ -75,24 +76,31 @@ async function apiJson(url, options = {}) {
     return data;
 }
 
-async function uploadFile(file) {
-    if (!file) {
-        setStatus('Seleziona un PDF.');
+async function uploadFiles(fileList) {
+    const files = Array.from(fileList || []);
+
+    if (files.length === 0) {
+        setStatus('Seleziona almeno un PDF.');
         return;
     }
 
-    if (file.size > MAX_UPLOAD_SIZE_MB * 1024 * 1024) {
-        setStatus(
-            `Il file supera la dimensione massima di ${MAX_UPLOAD_SIZE_MB} MB.`
-        );
+    for (const file of files) {
+        if (file.size > MAX_UPLOAD_SIZE_MB * 1024 * 1024) {
+            setStatus(
+                `«${file.name}» supera la dimensione massima di ${MAX_UPLOAD_SIZE_MB} MB.`
+            );
 
-        return;
+            return;
+        }
     }
 
     const formData = new FormData();
 
     formData.append('action', 'upload');
-    formData.append('pdf', file);
+
+    for (const file of files) {
+        formData.append('pdf[]', file);
+    }
 
     try {
         setStatus('Caricamento PDF...');
@@ -102,25 +110,46 @@ async function uploadFile(file) {
             body: formData
         });
 
-        // Rilascia il documento precedente per liberare la memoria.
-        if (pdfDocument) {
-            if (currentRenderTask) {
-                currentRenderTask.cancel();
-                currentRenderTask = null;
-            }
-
-            await pdfDocument.destroy();
-            pdfDocument = null;
+        // Rilascia i documenti precedenti per liberare la memoria.
+        if (currentRenderTask) {
+            currentRenderTask.cancel();
+            currentRenderTask = null;
         }
 
-        // PDF.js carica il documento originale dal browser.
-        const arrayBuffer = await file.arrayBuffer();
+        for (const doc of pdfDocuments) {
+            await doc.destroy();
+        }
 
-        pdfDocument = await pdfjsLib.getDocument({
-            data: arrayBuffer
-        }).promise;
+        pdfDocuments = [];
 
-        currentFilename = result.filename;
+        // PDF.js carica i documenti originali dal browser.
+        for (const file of files) {
+            const arrayBuffer = await file.arrayBuffer();
+
+            pdfDocuments.push(await pdfjsLib.getDocument({
+                data: arrayBuffer
+            }).promise);
+        }
+
+        // Mappa delle pagine globali: offset cumulativo per file.
+        documentMeta = [];
+
+        let offset = 0;
+
+        for (const info of result.files) {
+            documentMeta.push({
+                filename: info.filename,
+                pages: info.pages,
+                offset: offset
+            });
+
+            offset += info.pages;
+        }
+
+        currentFilename = result.files.length === 1
+            ? result.files[0].filename
+            : '';
+
         totalPageCount = result.pages;
         currentPage = 1;
 
@@ -145,7 +174,9 @@ async function uploadFile(file) {
         await renderPage(1);
 
         setStatus(
-            `Caricato: ${result.filename} (${totalPageCount} pagine).`
+            result.files.length === 1
+                ? `Caricato: ${result.filename} (${totalPageCount} pagine).`
+                : `Caricati ${result.files.length} PDF (${totalPageCount} pagine).`
         );
 
     } catch (error) {
@@ -156,10 +187,10 @@ async function uploadFile(file) {
 uploadForm.addEventListener('submit', (event) => {
     event.preventDefault();
 
-    uploadFile(pdfFile.files[0]);
+    uploadFiles(pdfFile.files);
 });
 
-// Caricamento trascinando il file nella zona di upload.
+// Caricamento trascinando i file nella zona di upload.
 uploadForm.addEventListener('dragover', (event) => {
     event.preventDefault();
     uploadForm.classList.add('dragover');
@@ -173,19 +204,40 @@ uploadForm.addEventListener('drop', (event) => {
     event.preventDefault();
     uploadForm.classList.remove('dragover');
 
-    const file = event.dataTransfer.files[0];
-
-    if (file) {
+    if (event.dataTransfer.files.length > 0) {
         pdfFile.files = event.dataTransfer.files;
     }
 
-    uploadFile(file);
+    uploadFiles(event.dataTransfer.files);
 });
 
+
+// Individua il documento sorgente e la pagina locale per una
+// pagina globale della sequenza composta.
+function findDocument(globalPage) {
+    for (let i = 0; i < documentMeta.length; i++) {
+        const meta = documentMeta[i];
+
+        if (
+            globalPage > meta.offset
+            && globalPage <= meta.offset + meta.pages
+        ) {
+            return {
+                doc: pdfDocuments[i],
+                localPage: globalPage - meta.offset,
+                name: meta.filename
+            };
+        }
+    }
+
+    return null;
+}
+
 async function renderPage(page) {
-    if (!pdfDocument) {
+    if (pdfDocuments.length === 0) {
         return;
     }
+
 
     if (page < 1 || page > totalPageCount) {
         return;
@@ -207,8 +259,14 @@ async function renderPage(page) {
 
         setStatus(`Caricamento pagina ${page}...`);
 
-        // PDF.js visualizza il documento originale.
-        const pdfPage = await pdfDocument.getPage(page);
+        const target = findDocument(page);
+
+        if (!target || !target.doc) {
+            throw new Error('Pagina non disponibile nel documento.');
+        }
+
+        // PDF.js visualizza la pagina del documento sorgente.
+        const pdfPage = await target.doc.getPage(target.localPage);
 
         if (version !== renderVersion) {
             return;
@@ -275,7 +333,12 @@ async function renderPage(page) {
 
         updateOverlay();
 
-        setStatus(`Pagina ${page} di ${totalPageCount}.`);
+        const sourceInfo = findDocument(page);
+        const sourceLabel = documentMeta.length > 1 && sourceInfo
+            ? ` — ${sourceInfo.name}`
+            : '';
+
+        setStatus(`Pagina ${page} di ${totalPageCount}${sourceLabel}.`);
 
     } catch (error) {
         if (error.name !== 'RenderingCancelledException') {
@@ -381,7 +444,7 @@ function pointerToPdfPoint(event) {
 
 // Selezione dell'area trascinando il mouse sulla pagina.
 pdfCanvas.addEventListener('pointerdown', (event) => {
-    if (!pdfDocument || !originalPageWidth) {
+    if (pdfDocuments.length === 0 || !originalPageWidth) {
         return;
     }
 
@@ -446,11 +509,11 @@ function enableTextActions(enabled) {
 }
 
 function buildBaseFilename() {
-    const base = (currentFilename || 'documento')
+    const base = (currentFilename || 'documenti_multipli')
         .replace(/\.pdf$/i, '')
         .replace(/[^\w\-.]+/g, '_');
 
-    return base || 'documento';
+    return base || 'documenti_multipli';
 }
 
 function downloadText(text, filename) {
@@ -560,6 +623,7 @@ async function bulkExtractAll() {
     }
 
     const sections = [];
+    const multi = documentMeta.length > 1;
 
     try {
         extractButton.disabled = true;
@@ -596,10 +660,11 @@ async function bulkExtractAll() {
             });
 
             for (const entry of result.pages) {
-                sections.push(
-                    `--- Pagina ${entry.page} ---\n` +
-                    entry.text.trimEnd()
-                );
+                const label = multi
+                    ? `--- ${entry.source} · pagina ${entry.page} ---`
+                    : `--- Pagina ${entry.page} ---`;
+
+                sections.push(`${label}\n${entry.text.trimEnd()}`);
             }
         }
 
@@ -654,7 +719,7 @@ clearAreaButton.addEventListener('click', () => {
 });
 
 window.addEventListener('resize', () => {
-    if (pdfDocument) {
+    if (pdfDocuments.length > 0) {
         renderPage(currentPage);
     }
 });
